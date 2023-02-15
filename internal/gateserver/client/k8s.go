@@ -96,5 +96,110 @@ func createPod(template AppPodTemplate) *v1.Pod {
 		podSpec.DNSConfig = dnsConfig
 	}
 
+	podSpec.Volumes = createVolumes()
+
+	reference := v1.LocalObjectReference{Name: "dockeryardkey"}
+	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, reference)
+
+	var containers []v1.Container
+	containers = append(containers, createContainer(template))
+
+	podSpec.Containers = containers
+	podSpec.RestartPolicy = "Always"
+
+	var v1Sysctls []v1.Sysctl
+	splits := strings.Split(template.Sysctl, ",")
+	for _, s := range splits {
+		v1Sysctl := v1.Sysctl{}
+		pair := strings.Split(strings.TrimSpace(s), "=")
+		if len(pair) > 1 {
+			v1Sysctl.Name = pair[0]
+			v1Sysctl.Value = pair[1]
+			v1Sysctls = append(v1Sysctls, v1Sysctl)
+		}
+	}
+
+	securityContext := &v1.PodSecurityContext{}
+	securityContext.Sysctls = v1Sysctls
+	podSpec.SecurityContext = securityContext
+
+	var hostAliases []v1.HostAlias
+	v1HostAlias := v1.HostAlias{}
+	v1HostAlias.IP = "127.0.0.1"
+	var hostNames1 []string
+	hostNames1 = append(hostNames1, "localhost.localdomain", "localhost4", "localhost4.localdomain4")
+	v1HostAlias.Hostnames = hostNames1
+	hostAliases = append(hostAliases, v1HostAlias)
+
+	var hostNames2 []string
+	hostNames1 = append(hostNames2, "localhost.localdomain", "localhost6", "localhost6.localdomain6")
+	v1HostAlias.Hostnames = hostNames2
+	hostAliases = append(hostAliases, v1HostAlias)
+
+	podSpec.HostAliases = hostAliases
+
+	pod.Spec = podSpec
+
 	return pod
+}
+
+func createVolumes() []v1.Volume {
+	var v1Volumes []v1.Volume
+
+	v1Volume := v1.Volume{}
+	v1Volume.Name = "cpuinfo"
+	v1HostPathVolumeSource := &v1.HostPathVolumeSource{}
+	v1HostPathVolumeSource.Path = "/var/lib/lxcfs/proc/cpuinfo"
+	v1Volume.HostPath = v1HostPathVolumeSource
+	v1Volumes = append(v1Volumes, v1Volume)
+
+	v1Volume = v1.Volume{}
+	v1Volume.Name = "diskstats"
+	v1HostPathVolumeSource = &v1.HostPathVolumeSource{}
+	v1HostPathVolumeSource.Path = "/var/lib/lxcfs/proc/diskstats"
+	v1Volume.HostPath = v1HostPathVolumeSource
+	v1Volumes = append(v1Volumes, v1Volume)
+
+	v1Volume = v1.Volume{}
+	v1Volume.Name = "meminfo"
+	v1HostPathVolumeSource = &v1.HostPathVolumeSource{}
+	v1HostPathVolumeSource.Path = "/var/lib/lxcfs/proc/meminfo"
+	v1Volume.HostPath = v1HostPathVolumeSource
+	v1Volumes = append(v1Volumes, v1Volume)
+
+	v1Volume = v1.Volume{}
+	v1Volume.Name = "stat"
+	v1HostPathVolumeSource = &v1.HostPathVolumeSource{}
+	v1HostPathVolumeSource.Path = "/var/lib/lxcfs/proc/stat"
+	v1Volume.HostPath = v1HostPathVolumeSource
+	v1Volumes = append(v1Volumes, v1Volume)
+
+	v1Volume = v1.Volume{}
+	v1Volume.Name = "swaps"
+	v1HostPathVolumeSource = &v1.HostPathVolumeSource{}
+	v1HostPathVolumeSource.Path = "/var/lib/lxcfs/proc/swaps"
+	v1Volume.HostPath = v1HostPathVolumeSource
+	v1Volumes = append(v1Volumes, v1Volume)
+
+	v1Volume = v1.Volume{}
+	v1Volume.Name = "uptime"
+	v1HostPathVolumeSource = &v1.HostPathVolumeSource{}
+	v1HostPathVolumeSource.Path = "/var/lib/lxcfs/proc/uptime"
+	v1Volume.HostPath = v1HostPathVolumeSource
+	v1Volumes = append(v1Volumes, v1Volume)
+
+	v1Volume = v1.Volume{}
+	v1Volume.Name = "localtime"
+	v1HostPathVolumeSource = &v1.HostPathVolumeSource{}
+	v1HostPathVolumeSource.Path = "/usr/share/zoneinfo/Asia/Shanghai"
+	v1Volume.HostPath = v1HostPathVolumeSource
+	v1Volumes = append(v1Volumes, v1Volume)
+
+	return v1Volumes
+}
+
+func createContainer(template AppPodTemplate) v1.Container {
+	v1Container := v1.Container{}
+
+	return v1Container
 }
