@@ -6,15 +6,48 @@ import (
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"strings"
 )
 
+const (
+	Mem_Oversubscribe_Flag = 1 << 0
+)
+
+var env string
+
+var k8sApiServer string
+
+var k8sBearerToken string
+
 type Config struct {
 	Host  string
 	Token string
 	Port  int
+}
+
+type PodHttpReadinessProbe struct {
+	path                string
+	port                int
+	failureThreshold    int32
+	initialDelaySeconds int32
+	periodSeconds       int32
+	timeoutSeconds      int32
+	successThreshold    int32
+}
+
+func newProbe() PodHttpReadinessProbe {
+	probe := PodHttpReadinessProbe{}
+	probe.path = "/hs"
+	probe.port = 8080
+	probe.failureThreshold = 12
+	probe.initialDelaySeconds = 60
+	probe.periodSeconds = 5
+	probe.timeoutSeconds = 3
+	probe.successThreshold = 3
+	return probe
 }
 
 type K8sQuota interface {
@@ -201,5 +234,168 @@ func createVolumes() []v1.Volume {
 func createContainer(template AppPodTemplate) v1.Container {
 	v1Container := v1.Container{}
 
+	var envs []v1.EnvVar
+
+	envVar := v1.EnvVar{}
+	envVar.Name = "APP_ID"
+	envVar.Value = template.AppID
+	envs = append(envs, envVar)
+
+	envVar = v1.EnvVar{}
+	envVar.Name = "APP_NAME"
+	envVar.Value = template.AppName
+	envs = append(envs, envVar)
+
+	envVar = v1.EnvVar{}
+	envVar.Name = "INSTANCE_NAME"
+	envVar.Value = template.PodName
+	envs = append(envs, envVar)
+
+	envVar = v1.EnvVar{}
+	envVar.Name = "ENV"
+	if strings.HasPrefix(env, "fat") || strings.HasPrefix(env, "lpt") {
+		envVar.Value = "fat"
+	} else if strings.HasPrefix(env, "uat") {
+		envVar.Value = "uat"
+	} else {
+		envVar.Value = env
+	}
+	envs = append(envs, envVar)
+
+	envVar = v1.EnvVar{}
+	envVar.Name = "TZ"
+	envVar.Value = "Asia/Shanghai"
+	envs = append(envs, envVar)
+
+	envVar = v1.EnvVar{}
+	envVar.Name = "LANG"
+	envVar.Value = "en_US.UTF-8"
+	envs = append(envs, envVar)
+
+	envVar = v1.EnvVar{}
+	envVar.Name = "LC_ALL"
+	envVar.Value = "en_US.UTF-8"
+	envs = append(envs, envVar)
+
+	// todo 不知道具体格式
+	//envVars := template.EnvJson
+
+	var javaOpts strings.Builder
+	if len(template.K8sQuota.GetJavaOpts()) > 0 {
+		javaOpts.WriteString(template.K8sQuota.GetJavaOpts())
+	}
+	if len(javaOpts.String()) > 0 {
+		envVar = v1.EnvVar{}
+		envVar.Name = "JAVA_TOOLS_OPTIONS"
+		envVar.Value = javaOpts.String()
+		envs = append(envs, envVar)
+	}
+
+	v1Container.Env = envs
+
+	requirements := v1.ResourceRequirements{}
+	if strings.EqualFold(env, "pro") {
+		limits := v1.ResourceList{}
+		limits["memory"] = template.K8sQuota.GetLimitMemory()
+		limits["cpu"] = template.K8sQuota.GetLimitCPU()
+		requirements.Limits = limits
+
+		requests := v1.ResourceList{}
+		requests["cpu"] = template.K8sQuota.GetRequestCPU()
+		requirements.Requests = requests
+
+		if template.Flags&Mem_Oversubscribe_Flag != 0 {
+			requirements.Requests["memory"] = template.K8sQuota.GetRequestMemory()
+		} else {
+			requirements.Requests["memory"] = template.K8sQuota.GetLimitMemory()
+		}
+	} else {
+		limits := v1.ResourceList{}
+		limits["memory"] = template.K8sQuota.GetLimitMemory()
+		limits["cpu"] = template.K8sQuota.GetLimitCPU()
+		requirements.Limits = limits
+
+		requests := v1.ResourceList{}
+		requests["cpu"] = template.K8sQuota.GetRequestCPU()
+		requests["memory"] = template.K8sQuota.GetRequestMemory()
+		requirements.Requests = requests
+	}
+
+	v1Container.Resources = requirements
+	v1Container.Image = template.Image
+	v1Container.ImagePullPolicy = "IfNotPresent"
+	v1Container.Name = formatContainerName(template.AppName)
+	v1Container.VolumeMounts = createVolumeMounts()
+
+	v1Container.ReadinessProbe = createReadinessProbe(newProbe())
+
 	return v1Container
+}
+
+func formatContainerName(containerName string) string {
+	return strings.ReplaceAll(containerName, "\\.", "-")
+}
+
+func createReadinessProbe(probe PodHttpReadinessProbe) *v1.Probe {
+
+	v1Probe := &v1.Probe{}
+
+	httpGetAction := &v1.HTTPGetAction{}
+	httpGetAction.Path = probe.path
+	httpGetAction.Port = intstr.FromInt(probe.port)
+	v1Probe.HTTPGet = httpGetAction
+
+	v1Probe.FailureThreshold = probe.failureThreshold
+	v1Probe.InitialDelaySeconds = probe.initialDelaySeconds
+	v1Probe.PeriodSeconds = probe.periodSeconds
+	v1Probe.TimeoutSeconds = probe.timeoutSeconds
+	v1Probe.SuccessThreshold = probe.successThreshold
+
+	return v1Probe
+}
+
+func createVolumeMounts() []v1.VolumeMount {
+	var volumeMounts []v1.VolumeMount
+
+	v1VolumeMount := v1.VolumeMount{}
+	v1VolumeMount.Name = "cpuinfo"
+	v1VolumeMount.MountPath = "/proc/cpuinfo"
+	volumeMounts = append(volumeMounts, v1VolumeMount)
+
+	v1VolumeMount = v1.VolumeMount{}
+	v1VolumeMount.Name = "diskstats"
+	v1VolumeMount.MountPath = "/proc/diskstats"
+	volumeMounts = append(volumeMounts, v1VolumeMount)
+
+	v1VolumeMount = v1.VolumeMount{}
+	v1VolumeMount.Name = "meminfo"
+	v1VolumeMount.MountPath = "/proc/meminfo"
+	volumeMounts = append(volumeMounts, v1VolumeMount)
+
+	v1VolumeMount = v1.VolumeMount{}
+	v1VolumeMount.Name = "stat"
+	v1VolumeMount.MountPath = "/proc/stat"
+	volumeMounts = append(volumeMounts, v1VolumeMount)
+
+	v1VolumeMount = v1.VolumeMount{}
+	v1VolumeMount.Name = "swaps"
+	v1VolumeMount.MountPath = "/proc/swaps"
+	volumeMounts = append(volumeMounts, v1VolumeMount)
+
+	v1VolumeMount = v1.VolumeMount{}
+	v1VolumeMount.Name = "uptime"
+	v1VolumeMount.MountPath = "/proc/uptime"
+	volumeMounts = append(volumeMounts, v1VolumeMount)
+
+	v1VolumeMount = v1.VolumeMount{}
+	v1VolumeMount.Name = "localtime"
+	v1VolumeMount.MountPath = "/etc/localtime"
+	volumeMounts = append(volumeMounts, v1VolumeMount)
+
+	return volumeMounts
+}
+
+func CreateNamespace(namespace string) error {
+
+	return nil
 }
