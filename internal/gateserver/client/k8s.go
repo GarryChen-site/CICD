@@ -2,7 +2,7 @@ package client
 
 import (
 	"context"
-	"fmt"
+	"github.com/google/martian/log"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,16 +16,16 @@ const (
 	Mem_Oversubscribe_Flag = 1 << 0
 )
 
-var env string
+//var env string
 
-var k8sApiServer string
+type Conf struct {
+	K8sApiServer string
 
-var k8sBearerToken string
+	K8sBearerToken string
 
-type Config struct {
-	Host  string
-	Token string
-	Port  int
+	Env string
+
+	RestConf *rest.Config
 }
 
 type PodHttpReadinessProbe struct {
@@ -81,25 +81,84 @@ type AppPodTemplate struct {
 	Flags     int64
 }
 
-var config *Config
-
-func queryAllPods(ctx context.Context) (*v1.PodList, error) {
-	clientSet, _ := NewKubernetesClient(config)
-	return clientSet.CoreV1().Pods(v1.NamespaceAll).List(ctx, metav1.ListOptions{})
-}
-
-func NewKubernetesClient(c *Config) (*kubernetes.Clientset, error) {
-	kubeConf := &rest.Config{
-		Host:        fmt.Sprintf("%s:%d", c.Host, c.Port),
-		BearerToken: c.Token,
-		TLSClientConfig: rest.TLSClientConfig{
-			Insecure: true,
-		},
+func (c *Conf) QueryAllPods(ctx context.Context) (*v1.PodList, error) {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return nil, err
 	}
-	return kubernetes.NewForConfig(kubeConf)
+	return clientset.CoreV1().Pods(v1.NamespaceAll).List(ctx, metav1.ListOptions{})
 }
 
-func createPod(template AppPodTemplate) *v1.Pod {
+func (c *Conf) DeployAppPod(ctx context.Context, temp *AppPodTemplate) error {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return err
+	}
+	pod := c.createPod(temp)
+	result, podCreateErr := clientset.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+	if podCreateErr != nil {
+		return podCreateErr
+	}
+	log.Infof("Pod created,result %s", result.String())
+	return nil
+}
+
+func (c *Conf) UpdateAppPod(ctx context.Context, dockerURL, namespace, podName, image string) error {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return err
+	}
+	clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	return nil
+}
+
+func (c *Conf) DeleteAppPod(ctx context.Context, namespace, podName string) error {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return err
+	}
+	propagationPolicy := metav1.DeletePropagationBackground
+	dele := metav1.DeleteOptions{PropagationPolicy: &propagationPolicy}
+	deleteErr := clientset.CoreV1().Pods(namespace).Delete(ctx, podName, dele)
+	if deleteErr != nil {
+		log.Infof("Pod deleted failed,instanceName:%s,err:%v", podName, deleteErr)
+		return deleteErr
+	}
+	log.Infof("Pod deleted successfully,instanceName:%s", podName)
+	return nil
+}
+
+func (c *Conf) ForceDeleteAppPod(ctx context.Context, namespace, podName string) error {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return err
+	}
+	propagationPolicy := metav1.DeletePropagationBackground
+	var time *int64
+	dele := metav1.DeleteOptions{PropagationPolicy: &propagationPolicy, GracePeriodSeconds: time}
+	deleteErr := clientset.CoreV1().Pods(namespace).Delete(ctx, podName, dele)
+	if deleteErr != nil {
+		log.Infof("Pod deleted failed,instanceName:%s,err:%v", podName, deleteErr)
+		return deleteErr
+	}
+	log.Infof("Pod deleted successfully,instanceName:%s", podName)
+	return nil
+}
+
+func NewKubernetesConf(env, k8sApiServer, k8sBearerToken string) *Conf {
+	r := &rest.Config{
+		APIPath:     k8sApiServer,
+		BearerToken: k8sBearerToken,
+	}
+
+	c := &Conf{
+		Env:      env,
+		RestConf: r,
+	}
+	return c
+}
+
+func (c *Conf) createPod(template *AppPodTemplate) *v1.Pod {
 	pod := &v1.Pod{}
 	pod.APIVersion = "v1"
 	pod.Kind = "Pod"
@@ -135,7 +194,7 @@ func createPod(template AppPodTemplate) *v1.Pod {
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, reference)
 
 	var containers []v1.Container
-	containers = append(containers, createContainer(template))
+	containers = append(containers, c.createContainer(template))
 
 	podSpec.Containers = containers
 	podSpec.RestartPolicy = "Always"
@@ -231,7 +290,7 @@ func createVolumes() []v1.Volume {
 	return v1Volumes
 }
 
-func createContainer(template AppPodTemplate) v1.Container {
+func (c *Conf) createContainer(template *AppPodTemplate) v1.Container {
 	v1Container := v1.Container{}
 
 	var envs []v1.EnvVar
@@ -253,12 +312,12 @@ func createContainer(template AppPodTemplate) v1.Container {
 
 	envVar = v1.EnvVar{}
 	envVar.Name = "ENV"
-	if strings.HasPrefix(env, "fat") || strings.HasPrefix(env, "lpt") {
+	if strings.HasPrefix(c.Env, "fat") || strings.HasPrefix(c.Env, "lpt") {
 		envVar.Value = "fat"
-	} else if strings.HasPrefix(env, "uat") {
+	} else if strings.HasPrefix(c.Env, "uat") {
 		envVar.Value = "uat"
 	} else {
-		envVar.Value = env
+		envVar.Value = c.Env
 	}
 	envs = append(envs, envVar)
 
@@ -294,7 +353,7 @@ func createContainer(template AppPodTemplate) v1.Container {
 	v1Container.Env = envs
 
 	requirements := v1.ResourceRequirements{}
-	if strings.EqualFold(env, "pro") {
+	if strings.EqualFold(c.Env, "pro") {
 		limits := v1.ResourceList{}
 		limits["memory"] = template.K8sQuota.GetLimitMemory()
 		limits["cpu"] = template.K8sQuota.GetLimitCPU()
@@ -395,7 +454,26 @@ func createVolumeMounts() []v1.VolumeMount {
 	return volumeMounts
 }
 
-func CreateNamespace(namespace string) error {
+func (c *Conf) CreateNamespace(ctx context.Context, namespace string) error {
 
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return err
+	}
+
+	nsName := &v1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: namespace,
+		},
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: "v1",
+			Kind:       "Namespace",
+		},
+	}
+
+	_, err = clientset.CoreV1().Namespaces().Create(ctx, nsName, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
 	return nil
 }
