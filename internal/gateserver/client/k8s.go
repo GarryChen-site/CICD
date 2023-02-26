@@ -1,15 +1,20 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"github.com/google/martian/log"
+	"io"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/remotecommand"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -87,6 +92,47 @@ func (c *Conf) QueryAllPods(ctx context.Context) (*v1.PodList, error) {
 		return nil, err
 	}
 	return clientset.CoreV1().Pods(v1.NamespaceAll).List(ctx, metav1.ListOptions{})
+}
+
+func (c *Conf) QueryAllPodsWithLabel(ctx context.Context, labelSelectorMap map[string]string) (*v1.PodList, error) {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return nil, err
+	}
+	labelSelect := convert(labelSelectorMap)
+
+	opts := metav1.ListOptions{}
+	opts.LabelSelector = labelSelect
+
+	return clientset.CoreV1().Pods(v1.NamespaceAll).List(ctx, opts)
+}
+
+func (c *Conf) QueryAppPods(ctx context.Context, namespace string, labelSelectorMap map[string]string) (*v1.PodList, error) {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return nil, err
+	}
+	labelSelect := convert(labelSelectorMap)
+
+	opts := metav1.ListOptions{}
+	opts.LabelSelector = labelSelect
+
+	return clientset.CoreV1().Pods(namespace).List(ctx, opts)
+}
+
+func convert(labelSelectorMap map[string]string) string {
+	var sb strings.Builder
+	for key, value := range labelSelectorMap {
+		sb.WriteString(key)
+		sb.WriteString("=")
+		sb.WriteString(value)
+		sb.WriteString(",")
+	}
+	labelSelect := sb.String()
+	if len(labelSelect) > 0 {
+		labelSelect = labelSelect[:len(labelSelect)-1]
+	}
+	return labelSelect
 }
 
 func (c *Conf) DeployAppPod(ctx context.Context, temp *AppPodTemplate) error {
@@ -476,4 +522,175 @@ func (c *Conf) CreateNamespace(ctx context.Context, namespace string) error {
 		return err
 	}
 	return nil
+}
+
+func (c *Conf) CreateConfigMap(ctx context.Context, namespace string, configName string, dataMap map[string]string) error {
+
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return err
+	}
+
+	body := &v1.ConfigMap{}
+	body.APIVersion = "v1"
+	body.Data = dataMap
+
+	objectMeta := metav1.ObjectMeta{Name: configName}
+	body.ObjectMeta = objectMeta
+
+	_, err = clientset.CoreV1().ConfigMaps(namespace).Create(ctx, body, metav1.CreateOptions{})
+	if err != nil {
+		return nil
+	}
+	return nil
+}
+
+func (c *Conf) GetConfigMap(ctx context.Context, namespace string, configName string) (*v1.ConfigMap, error) {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return nil, err
+	}
+	return clientset.CoreV1().ConfigMaps(namespace).Get(ctx, configName, metav1.GetOptions{})
+}
+
+func (c *Conf) DeleteConfigMap(ctx context.Context, namespace string, configName string) error {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return err
+	}
+	propagationPolicy := metav1.DeletePropagationBackground
+	var time *int64
+	dele := metav1.DeleteOptions{PropagationPolicy: &propagationPolicy, GracePeriodSeconds: time}
+	deleteErr := clientset.CoreV1().ConfigMaps(namespace).Delete(ctx, configName, dele)
+	if deleteErr != nil {
+		return deleteErr
+	}
+	return nil
+}
+
+func (c *Conf) ExecCommand(ctx context.Context, pod string, namespace string, commands []string) (string, string, error) {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return "", "", err
+	}
+	buf := &bytes.Buffer{}
+	errBuf := &bytes.Buffer{}
+	req := clientset.CoreV1().RESTClient().
+		Post().
+		Namespace(namespace).
+		Resource("pods").
+		Name(pod).
+		SubResource("exec").
+		VersionedParams(&v1.PodExecOptions{
+			Command: commands,
+			Stdin:   false,
+			Stdout:  true,
+			Stderr:  true,
+			TTY:     true,
+		}, scheme.ParameterCodec)
+	exec, err := remotecommand.NewSPDYExecutor(c.RestConf, "POST", req.URL())
+	err = exec.Stream(remotecommand.StreamOptions{
+		Stdout: buf,
+		Stderr: errBuf,
+	})
+	if err != nil {
+		return "", "", err
+	}
+	return buf.String(), errBuf.String(), nil
+}
+
+func (c *Conf) GetNodeByIP(ctx context.Context, hostIP string) (*v1.Node, error) {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return nil, err
+	}
+	opts := metav1.ListOptions{
+		LabelSelector: "kubernetes.io/hostname=" + hostIP,
+		Limit:         1,
+	}
+	nodeList, err := clientset.CoreV1().Nodes().List(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	if len(nodeList.Items) > 0 {
+		return &nodeList.Items[0], nil
+	}
+	return nil, nil
+}
+
+func (c *Conf) GetAppPodLog(ctx context.Context, namespace, instanceName string) (string, error) {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return "", err
+	}
+	opts := &v1.PodLogOptions{}
+	opts.Follow = false
+	limitBytes := int64(1 * 1024 * 1024)
+	opts.LimitBytes = &limitBytes
+	opts.Previous = false
+	opts.SinceSeconds = nil
+	tailLines := int64(5000)
+	opts.TailLines = &tailLines
+	opts.Timestamps = false
+	req := clientset.CoreV1().Pods(namespace).GetLogs(instanceName, opts)
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+
+	// Read log output
+	buf := make([]byte, 1024)
+	for {
+		n, err := stream.Read(buf)
+		if err != nil {
+			if err != io.EOF {
+				panic(err)
+			}
+			break
+		}
+		return string(buf[:n]), nil
+	}
+	return "", nil
+}
+
+func (c *Conf) CreateService(ctx context.Context, appName, namespace string) error {
+	clientset, err := kubernetes.NewForConfig(c.RestConf)
+	if err != nil {
+		return err
+	}
+	service := &v1.Service{}
+	objectMeta := metav1.ObjectMeta{}
+	objectMeta.Name = getServiceFromAppName(appName)
+	service.ObjectMeta = objectMeta
+
+	service.Kind = "Service"
+	service.APIVersion = "v1"
+
+	spec := v1.ServiceSpec{}
+	selector := map[string]string{}
+	selector["app"] = appName
+	spec.Selector = selector
+
+	port := v1.ServicePort{}
+	port.Protocol = v1.ProtocolTCP
+	port.Port = 8080
+	port.TargetPort = intstr.FromInt(8080)
+	spec.Ports = []v1.ServicePort{port}
+
+	service.Spec = spec
+
+	_, err = clientset.CoreV1().Services(namespace).Create(ctx, service, metav1.CreateOptions{})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func getServiceFromAppName(appName string) string {
+	service := strings.ReplaceAll(appName, ".", "-")
+	if unicode.IsDigit(rune(appName[0])) {
+		return "s" + service
+	}
+	return service
 }
